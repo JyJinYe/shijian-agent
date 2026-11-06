@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Shijian Agent installer v1. Configuration is read only from stdin.
-set -euo pipefail
+# Shijian Agent installer v2. Keep all setup and operation instructions here.
 set +x
+# Keep execution inside one function so a truncated curl response cannot run a partial install.
+shijian_install_main() {
+set -euo pipefail
 umask 077
 step='检查安装参数'
 work=''
@@ -20,10 +22,23 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 fail() { printf '%s\n' "$1" >&2; exit 1; }
-platform='' version='' digest='' image_id=''
+printf '时见 Agent 安装：需要 root 和 Linux amd64；原生安装需要 systemd，Docker 安装需要 Linux >=5.12 与 rootful Docker。\n'
+printf '安装包按固定版本校验 SHA256；已有安装不会覆盖，自动更新关闭。命令包含长期节点凭据，请勿公开或分享。\n'
+platform='linux-amd64' version='' digest='' image_id=''
+endpoint='' server_id='' token='' interfaces=''
+usage() { printf '用法：安装命令 --endpoint HTTPS主站 --server-id 节点ID --token 上报令牌 [--interfaces eth0,eth1] [--docker]\n'; }
+if [ "$#" = 0 ]; then usage; fail '缺少安装配置'; fi
 while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --help) usage; exit 0;;
+    --docker) platform='docker-amd64'; shift; continue;;
+  esac
   [ "$#" -ge 2 ] || fail '安装参数缺少值'
   case "$1" in
+    --endpoint) endpoint=$2;;
+    --server-id) server_id=$2;;
+    --token) token=$2;;
+    --interfaces) interfaces=$2;;
     --platform) platform=$2;;
     --version) version=$2;;
     --sha256) digest=$2;;
@@ -32,6 +47,27 @@ while [ "$#" -gt 0 ]; do
   esac
   shift 2
 done
+# BEGIN FROZEN RELEASE
+release_version='0.3.0-preview.10'
+native_sha256='090bb8ab929f7759614af4847365476e43550cd4cf8cd571bec7326b4396c903'
+docker_sha256='ccb82e20015f3484a0fc8919da4d1c533fad1405677cb7d78e297250ef6a0521'
+docker_image_id='sha256:5473420b58cacf505933f1a5b5ee364592e31a71cad14d1ea5eede4f78eef4a8'
+# END FROZEN RELEASE
+version=${version:-$release_version}
+case "$platform" in
+  linux-amd64) digest=${digest:-$native_sha256};;
+  docker-amd64) digest=${digest:-$docker_sha256}; image_id=${image_id:-$docker_image_id};;
+esac
+config_from_args=0
+if [ -n "$endpoint$server_id$token$interfaces" ]; then
+  config_from_args=1
+  [[ "$endpoint" =~ ^https://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?/?$ ]] || fail '需要可信 HTTPS 主站地址，不允许路径、查询参数或用户信息'
+  [[ "$server_id" =~ ^[A-Za-z0-9_-]{1,80}$ ]] || fail '节点 ID 无效'
+  [[ "$token" =~ ^ms_[a-f0-9]{8}_[A-Za-z0-9_-]{32}$ ]] || fail '上报令牌格式无效'
+  if [ -n "$interfaces" ]; then
+    [[ "$interfaces" =~ ^[A-Za-z0-9_.:-]{1,80}(,[A-Za-z0-9_.:-]{1,80})*$ ]] && [ "${#interfaces}" -le 8000 ] || fail '统计接口名无效'
+  fi
+fi
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || fail '版本无效'
 [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail '安装包摘要无效'
 case "$platform" in
@@ -79,9 +115,14 @@ if command -v docker >/dev/null 2>&1; then
 fi
 step='读取安装配置'
 work=$(mktemp -d /tmp/shijian-install.XXXXXXXX)
-# The UI supplies JSON. Agent validates its schema before starting collection.
-# Limit input size without printing its contents or passing it as a process argument.
-head -c 65537 > "$work/config.json"
+if [ "$config_from_args" = 1 ]; then
+  # Every value is restricted above to JSON-safe characters; never evaluate arguments as shell code.
+  printf '{"endpoint":"%s","server_id":"%s","token":"%s","interfaces":"%s","state_file":"/var/lib/shijian-probe/state.json"}\n' \
+    "$endpoint" "$server_id" "$token" "$interfaces" > "$work/config.json"
+else
+  # Compatibility for commands that pass an explicit package checksum and JSON via stdin.
+  head -c 65537 > "$work/config.json"
+fi
 config_size=$(wc -c < "$work/config.json")
 [ "$config_size" -gt 0 ] && [ "$config_size" -le 65536 ] || fail '安装配置为空或超过 64 KiB'
 step='从 GitHub 下载固定版本包'
@@ -152,3 +193,58 @@ else
   printf 'Agent 容器已启动。查看状态：docker inspect shijian-probe\n'
 fi
 printf '请返回主站确认收到上报；服务启动不代表主站已经接收数据。\n'
+
+step='保存日常操作说明'
+if [ "$platform" = linux-amd64 ]; then
+  cat > /etc/shijian-probe/OPERATIONS.txt <<'OPERATIONS'
+以下命令按需单独执行，不要整段运行。
+
+查看状态：
+  systemctl status --no-pager shijian-probe
+查看日志：
+  journalctl -u shijian-probe -n 50 --no-pager
+临时暂停（重启机器后仍会自动启动）：
+  systemctl stop shijian-probe
+恢复运行：
+  systemctl start shijian-probe
+重启 Agent：
+  systemctl restart shijian-probe
+暂停并取消开机启动：
+  systemctl disable --now shijian-probe
+恢复并启用开机启动：
+  systemctl enable --now shijian-probe
+卸载程序（保留配置和状态）：
+  systemctl disable --now shijian-probe && rm -f /etc/systemd/system/shijian-probe.service /usr/local/bin/shijian-probe && systemctl daemon-reload
+OPERATIONS
+else
+  cat > /etc/shijian-probe/OPERATIONS.txt <<'OPERATIONS'
+以下命令按需单独执行，不要整段运行。
+
+查看状态：
+  docker inspect shijian-probe
+查看日志：
+  docker logs --tail 50 shijian-probe
+临时暂停：
+  docker stop --time 25 shijian-probe
+恢复运行：
+  docker start shijian-probe
+重启 Agent：
+  docker restart --time 25 shijian-probe
+暂停并取消自动启动：
+  docker update --restart=no shijian-probe && docker stop --time 25 shijian-probe
+恢复运行并启用自动启动：
+  docker update --restart=unless-stopped shijian-probe && docker start shijian-probe
+卸载容器（保留配置和状态）：
+  docker stop --time 25 shijian-probe && docker rm shijian-probe
+OPERATIONS
+fi
+cat >> /etc/shijian-probe/OPERATIONS.txt <<'OPERATIONS'
+
+暂停后停止采集与上报，已有补报状态保留。
+卸载默认保留 /etc/shijian-probe 和 /var/lib/shijian-probe；需要重新安装或升级时先备份，勿用旧状态覆盖最新队列。
+卸载后请在主站「令牌管理」撤销该节点凭据；本机卸载不会自动撤销主站令牌。
+再次查看本说明：cat /etc/shijian-probe/OPERATIONS.txt
+OPERATIONS
+cat /etc/shijian-probe/OPERATIONS.txt
+}
+shijian_install_main "$@"

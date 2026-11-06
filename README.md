@@ -3,9 +3,11 @@
 Public installation scripts and checksum-pinned Linux amd64/systemd and Docker amd64 packages.
 Generate the installation command in your Shijian server management page. It includes your private node configuration: treat it as a credential and never post it here.
 
-The installer reads configuration JSON from stdin and accepts `--platform linux-amd64|docker-amd64 --version VERSION --sha256 PACKAGE_SHA256` (Docker also requires `--image-id sha256:...`). Run as root. Native installation requires systemd; Docker requires Linux >=5.12 and rootful Docker Engine, excluding Docker Desktop.
+The short command uses `curl -fsSL PINNED_INSTALLER_URL | bash -s -- --endpoint HTTPS_ORIGIN --server-id NODE_ID --token REPORT_TOKEN`, with optional `--interfaces eth0,eth1` and `--docker`. The installer embeds frozen package versions, SHA256 and Docker image ID. Installation requirements and reminders are printed on the target machine; configuration is written with mode 0600 and is never printed or sent to GitHub. The earlier JSON-via-stdin interface remains available with explicit package arguments.
 
-The UI pins the installer commit and SHA256 and the package version and SHA256. Packages live in `agent-VERSION` Releases. There is no automatic update. An existing installation is rejected; use the upgrade/rollback instructions supplied by your control panel.
+The command downloads the installer over HTTPS at a fixed commit. Its SHA256 is checked at publication and recorded in the control panel distribution manifest; the short command does not perform a separate pre-execution script hash check. The installer verifies the downloaded package SHA256 against its embedded frozen release metadata. Packages live in `agent-VERSION` Releases. There is no automatic update. An existing installation is rejected; use the upgrade/rollback instructions supplied by your control panel.
+
+After installation, the script prints status, logs, temporary stop/start, restart, automatic startup and uninstall commands for the selected platform, and saves the same instructions to `/etc/shijian-probe/OPERATIONS.txt`. Uninstall instructions preserve configuration and state and remind the user to revoke the control panel token.
 
 Missing dependencies, network errors, integrity failures and service startup errors stop installation. Temporary files are cleaned; installed configuration and state remain available for diagnosis. Service startup alone does not confirm delivery to the control panel.
 
