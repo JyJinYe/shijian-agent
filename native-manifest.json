@@ -1,0 +1,15 @@
+{
+  "version": "0.3.0-preview.10",
+  "platform": "linux-amd64",
+  "protocol_version": 1,
+  "state_format": 2,
+  "filename": "shijian-probe-0.3.0-preview.10-linux-amd64.tar.gz",
+  "size_bytes": "5408009",
+  "sha256": "090bb8ab929f7759614af4847365476e43550cd4cf8cd571bec7326b4396c903",
+  "binary_sha256": "e14c21661bfe3bded8e437186f70e077689a886805c503ac34d3459fa2cc5f78",
+  "source_commit": "686038dc40f49bca54ee8d722f10d5addb115e28",
+  "source_go_sha256": "6b31497acdeda53a48e45c663cdd6e5f1161f200c330c0d740191ce04ee93468",
+  "go_toolchain": "go1.26.10",
+  "minimum_server": "0.3.0-preview.17（需独立样本能力声明；配套时钟新鲜度修复见preview.26）",
+  "verified_scope": "当前Ubuntu22.04.5 amd64原生/systemd；核心采集、TCP/ICMP v4/v6、独立网络落盘与积压恢复、真实连接失败/丢ACK/进程崩溃、时钟异常缓存；其他平台和GPU正向不在本轮范围"
+}
