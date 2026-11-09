@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shijian Agent installer v5. Keep all setup and operation instructions here.
+# Shijian Agent installer v6. Keep all setup and operation instructions here.
 set +x
 # Keep execution inside one function so a truncated curl response cannot run a partial install.
 shijian_install_main() {
@@ -18,6 +18,9 @@ upgrade_complete=0
 old_running=0
 container_renamed=0
 rollback_container=''
+rebind=0
+state_archive=''
+new_native_files=0
 release_state_lock() {
   if [ -n "$state_lock_fd" ]; then
     flock -u "$state_lock_fd" || true
@@ -33,7 +36,7 @@ cleanup() {
     set +e
     rollback_ok=1
     if [ "$installed" = docker-amd64 ] && [ -n "$rollback_container" ] && docker container inspect "$rollback_container" >/dev/null 2>&1; then container_renamed=1; fi
-    printf '升级失败，正在恢复原部署；保留最新状态与补报队列，不恢复旧状态备份。\n' >&2
+    printf '安装未完成，正在恢复原部署；同节点保留最新队列，重新绑定时分别保留新旧节点状态。\n' >&2
     if [ "$installed" = linux-amd64 ]; then
       systemctl stop shijian-probe || rollback_ok=0
       binary_tmp=$(mktemp /usr/local/bin/.shijian-probe.XXXXXXXX)
@@ -44,6 +47,26 @@ cleanup() {
     elif [ "$container_renamed" = 1 ]; then
       if docker container inspect shijian-probe >/dev/null 2>&1; then docker rm -f shijian-probe >/dev/null || rollback_ok=0; fi
     fi
+    if [ -z "$installed" ]; then
+      if [ "$platform" = linux-amd64 ] && [ "$new_native_files" = 1 ]; then
+        systemctl stop shijian-probe 2>/dev/null || true
+        rm -f /usr/local/bin/shijian-probe /etc/systemd/system/shijian-probe.service || rollback_ok=0
+        systemctl daemon-reload || rollback_ok=0
+      elif [ "$platform" = docker-amd64 ] && docker container inspect shijian-probe >/dev/null 2>&1; then
+        docker rm -f shijian-probe >/dev/null || rollback_ok=0
+      fi
+    fi
+    # A different identity must never inherit the previous node's outbox.
+    # Move complete directories on the same filesystem; do not overwrite either
+    # node's latest state with a copied snapshot during rollback.
+    if [ -n "$state_archive" ] && [ -d "$state_archive/previous" ]; then
+      if [ -e /var/lib/shijian-probe ]; then
+        mv -- /var/lib/shijian-probe "$state_archive/failed-new-state" || rollback_ok=0
+      fi
+      if [ ! -e /var/lib/shijian-probe ]; then
+        mv -- "$state_archive/previous" /var/lib/shijian-probe || rollback_ok=0
+      else rollback_ok=0; fi
+    fi
     if [ -f "$backup/config.json" ]; then
       config_tmp=$(mktemp /etc/shijian-probe/.config.XXXXXXXX)
       if install -m 600 "$backup/config.json" "$config_tmp"; then
@@ -53,7 +76,7 @@ cleanup() {
     fi
     if [ "$installed" = linux-amd64 ]; then
       if [ "$old_running" = 1 ]; then systemctl start shijian-probe || rollback_ok=0; fi
-    else
+    elif [ "$installed" = docker-amd64 ]; then
       if [ "$container_renamed" = 1 ]; then docker rename "$rollback_container" shijian-probe || rollback_ok=0; fi
       if [ "$old_running" = 1 ]; then docker start shijian-probe >/dev/null || rollback_ok=0; fi
     fi
@@ -74,7 +97,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 printf '时见 Agent 安装：需要 root 和 Linux amd64；原生安装需要 systemd，Docker 安装需要 Linux >=5.12 与 rootful Docker。\n'
-printf '安装包按固定版本校验 SHA256；同一节点、同一部署方式可直接覆盖升级，先验包再停机并备份，失败恢复原部署；保留最新状态重装，自动更新关闭。命令包含长期节点凭据，请勿公开或分享。\n'
+printf '安装包按固定版本校验 SHA256；同一部署方式可直接覆盖；同节点保留队列，新节点先隔离旧状态再重新绑定，先验包再停机并备份，失败恢复原部署；保留最新状态重装，自动更新关闭。命令包含长期节点凭据，请勿公开或分享。\n'
 platform='linux-amd64' version='' digest='' image_id=''
 endpoint='' server_id='' token='' interfaces='' github_proxy=''
 interfaces_set=0
@@ -265,10 +288,12 @@ if [ -f /etc/shijian-probe/config.json ]; then
   read_identity /etc/shijian-probe/config.json || fail '无法可靠读取保留配置的节点身份；仅自动恢复标准字符串配置，请人工检查，未改动原配置与状态'
   old_endpoint=$config_endpoint old_server_id=$config_server_id old_state_file=$config_state_file old_interfaces=$config_interfaces
   read_identity "$work/config.json" || fail '无法读取本次配置的节点身份，未改动原配置与状态'
-  [ "$old_endpoint" = "$config_endpoint" ] && [ "$old_server_id" = "$config_server_id" ] || fail '本次主站地址或节点 ID 与保留配置不一致，拒绝复用旧状态；请使用原节点命令或人工迁移'
+  if [ "$old_endpoint" != "$config_endpoint" ] || [ "$old_server_id" != "$config_server_id" ]; then
+    rebind=1
+  fi
   [ "$old_state_file" = /var/lib/shijian-probe/state.json ] && [ "$config_state_file" = "$old_state_file" ] || fail '保留配置使用了不同的状态路径，请人工迁移，未改动原配置与状态'
   recover=1
-  if [ "$interfaces_set" = 0 ] && [ -z "$config_interfaces" ]; then
+  if [ "$rebind" = 0 ] && [ "$interfaces_set" = 0 ] && [ -z "$config_interfaces" ]; then
     # An omitted/empty initial interface selection keeps the local selection.
     [[ "$old_interfaces" != *'"'* ]] || fail '原统计接口配置无效'
     printf '{"endpoint":"%s","server_id":"%s","token":"%s","interfaces":"%s","state_file":"/var/lib/shijian-probe/state.json"}\n' "$config_endpoint" "$config_server_id" "$config_token" "$old_interfaces" > "$work/config.json"
@@ -285,7 +310,11 @@ if [ "$recover" = 1 ]; then
     exec {state_lock_fd}<> /var/lib/shijian-probe/state.json.lock
     flock -n "$state_lock_fd" || fail '保留状态仍被 Agent 进程占用，请先停止原进程；未改动配置与状态'
   fi
-  printf '检测到同一节点的保留配置，重装将保留最新状态与补报队列，并备份旧配置后更新本次凭据。\n'
+  if [ "$rebind" = 1 ]; then
+    printf '检测到节点或主站变更：将备份旧配置并隔离完整旧状态，新节点使用独立会话和队列；不会将旧数据补报到新节点。\n'
+  else
+    printf '检测到同一节点的保留配置，重装将保留最新状态与补报队列，并备份旧配置后更新本次凭据。\n'
+  fi
 fi
 if [ -n "$package_file" ]; then
   step='读取本地固定版本包'
@@ -314,37 +343,51 @@ else
   docker image inspect "$image_id" >/dev/null
 fi
 # Downloads and integrity/version checks above never interrupt the old process.
-if [ -n "$installed" ]; then
+if [ -n "$installed" ] || [ "$rebind" = 1 ]; then
   step='备份并停止旧 Agent'
   install -d -m 700 /var/lib/shijian-probe
   backup=$(mktemp -d /etc/shijian-probe/upgrade-backup.XXXXXXXX)
   install -m 600 /etc/shijian-probe/config.json "$backup/config.json"
+  install -m 600 "$work/config.json" "$backup/requested-config.json"
   if [ -f /etc/shijian-probe/OPERATIONS.txt ]; then install -m 600 /etc/shijian-probe/OPERATIONS.txt "$backup/OPERATIONS.txt"; fi
   if [ "$installed" = linux-amd64 ]; then
     install -m 700 /usr/local/bin/shijian-probe "$backup/shijian-probe"
     install -m 600 /etc/systemd/system/shijian-probe.service "$backup/shijian-probe.service"
     if systemctl is-active --quiet shijian-probe; then old_running=1; fi
-  else
+  elif [ "$installed" = docker-amd64 ]; then
     docker container inspect shijian-probe > "$backup/container.json"
     if [ "$(docker inspect --format '{{.State.Running}}' shijian-probe)" = true ]; then old_running=1; fi
     rollback_container="shijian-probe-backup-${backup##*.}"
   fi
   upgrade_started=1
   if [ "$installed" = linux-amd64 ]; then systemctl stop shijian-probe
-  else
+  elif [ "$installed" = docker-amd64 ]; then
     docker stop --time 25 shijian-probe >/dev/null
     docker rename shijian-probe "$rollback_container"
     container_renamed=1
   fi
   step='锁定并备份最新状态'
-  exec {state_lock_fd}<> /var/lib/shijian-probe/state.json.lock
-  flock -n "$state_lock_fd" || fail '旧进程停止后状态仍被占用，拒绝替换程序'
+  if [ -z "$state_lock_fd" ]; then
+    exec {state_lock_fd}<> /var/lib/shijian-probe/state.json.lock
+    flock -n "$state_lock_fd" || fail '旧进程停止后状态仍被占用，拒绝替换程序'
+  fi
   if [ -f /var/lib/shijian-probe/state.json ]; then install -m 600 /var/lib/shijian-probe/state.json "$backup/state.json"; fi
-  printf '旧部署和最新状态已备份至 %s；升级及回退均保留原位最新队列。\n' "$backup"
+  if [ "$rebind" = 1 ]; then
+    step='隔离旧节点状态'
+    state_archive=$(mktemp -d /var/lib/shijian-probe-rebind.XXXXXXXX)
+    printf '%s\n' "$state_archive" > "$backup/STATE_ARCHIVE"
+    mv -- /var/lib/shijian-probe "$state_archive/previous"
+    install -d -m 700 /var/lib/shijian-probe
+    release_state_lock
+    exec {state_lock_fd}<> /var/lib/shijian-probe/state.json.lock
+    flock -n "$state_lock_fd" || fail '新状态目录已被其他进程占用，拒绝继续重新绑定'
+    printf '旧节点状态已隔离至 %s/previous；新节点将使用独立状态，失败时恢复旧绑定并保留新队列。\n' "$state_archive"
+  fi
+  printf '旧部署和最新状态已备份至 %s。\n' "$backup"
 fi
 step='安装配置与创建状态目录'
 install -d -m 700 /etc/shijian-probe /var/lib/shijian-probe
-if [ "$recover" = 1 ] && [ -z "$installed" ]; then
+if [ "$recover" = 1 ] && [ -z "$installed" ] && [ "$rebind" = 0 ]; then
   backup=$(mktemp -d /etc/shijian-probe/reinstall-backup.XXXXXXXX)
   install -m 600 /etc/shijian-probe/config.json "$backup/config.json"
   printf '原配置已备份至 %s/config.json；状态目录保持原位。\n' "$backup"
@@ -355,6 +398,7 @@ mv -f -- "$config_tmp" /etc/shijian-probe/config.json
 config_tmp=''
 if [ "$platform" = linux-amd64 ]; then
   step='安装程序与 systemd 服务'
+  new_native_files=1
   binary_tmp=$(mktemp /usr/local/bin/.shijian-probe.XXXXXXXX)
   install -m 755 "$work/unpacked/shijian-probe" "$binary_tmp"
   mv -f -- "$binary_tmp" /usr/local/bin/shijian-probe
@@ -457,9 +501,9 @@ fi
 cat >> /etc/shijian-probe/OPERATIONS.txt <<'OPERATIONS'
 
 暂停后停止采集与上报，已有补报状态保留。
-卸载默认保留 /etc/shijian-probe 和 /var/lib/shijian-probe；为同一主站、同一节点重新复制新版安装命令即可覆盖升级或保留状态重装。
+卸载默认保留 /etc/shijian-probe 和 /var/lib/shijian-probe；重新复制新版安装命令即可覆盖升级；同节点保留队列，节点或主站变化时先隔离旧状态再重新绑定。
 覆盖升级先校验新包，再停止旧服务/容器并备份程序、配置与最新状态；启动失败自动恢复原部署，不用旧状态覆盖最新队列。
-升级沿用同一部署方式，保留原生服务定义及 Docker 自动重启策略；未指定 --interfaces 时保留原统计接口，配置更新为本次凭据。身份不一致、跨部署方式或文件异常时会拒绝。
+升级沿用同一部署方式，保留原生服务定义及 Docker 自动重启策略；同节点未指定 --interfaces 时保留原统计接口，重新绑定按新配置选择；配置更新为本次凭据。更换节点或主站时，新旧身份分别使用独立队列；旧配置和状态保存在输出的备份目录。跨部署方式或文件异常时会拒绝。
 卸载后请在主站「令牌管理」撤销该节点凭据；本机卸载不会自动撤销主站令牌。
 再次查看本说明：cat /etc/shijian-probe/OPERATIONS.txt
 OPERATIONS
