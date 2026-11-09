@@ -64,10 +64,10 @@ case "$github_proxy" in
   *) fail '不支持的 GitHub 下载代理';;
 esac
 # BEGIN FROZEN RELEASE
-release_version='0.3.0-preview.11'
-native_sha256='ebd61d4c5086a2d8d79e1b0e54c55554ec7aa730873e68b9fd3a8d350de5eb94'
-docker_sha256='03deee31f416711c6cd0786e9323575e63a1ee2250c3d11cd8ed1da390209e7e'
-docker_image_id='sha256:ac2af6aa14ac39c3f747a9d7a9296df4f4dd2c97f793c28e06d716edd7f43f10'
+release_version='0.3.0-preview.12'
+native_sha256='ed5309269a0ca46694d29d55f5643aa92786cc10fb6b5090dd2164de1f63c92d'
+docker_sha256='65d2bc6e5791eb9d8520fae1432ece53117b597d88e19dd5dad3dbace9b26f20'
+docker_image_id='sha256:c4e9ca927bd724179417fc7337d36288df1337af5b950f9be3c30fc3391b7d86'
 # END FROZEN RELEASE
 version=${version:-$release_version}
 case "$platform" in
