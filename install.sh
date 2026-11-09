@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shijian Agent installer v3. Keep all setup and operation instructions here.
+# Shijian Agent installer v4. Keep all setup and operation instructions here.
 set +x
 # Keep execution inside one function so a truncated curl response cannot run a partial install.
 shijian_install_main() {
@@ -36,8 +36,8 @@ fail() { printf '%s\n' "$1" >&2; exit 1; }
 printf '时见 Agent 安装：需要 root 和 Linux amd64；原生安装需要 systemd，Docker 安装需要 Linux >=5.12 与 rootful Docker。\n'
 printf '安装包按固定版本校验 SHA256；仍有程序、服务或容器时不会覆盖；卸载后可为同一节点保留状态重装，自动更新关闭。命令包含长期节点凭据，请勿公开或分享。\n'
 platform='linux-amd64' version='' digest='' image_id=''
-endpoint='' server_id='' token='' interfaces=''
-usage() { printf '用法：安装命令 --endpoint HTTPS主站 --server-id 节点ID --token 上报令牌 [--interfaces eth0,eth1] [--docker]\n'; }
+endpoint='' server_id='' token='' interfaces='' github_proxy=''
+usage() { printf '用法：安装命令 --endpoint HTTPS主站 --server-id 节点ID --token 上报令牌 [--interfaces eth0,eth1] [--docker] [--github-proxy https://gh-proxy.org/]\n'; }
 if [ "$#" = 0 ]; then usage; fail '缺少安装配置'; fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -46,6 +46,7 @@ while [ "$#" -gt 0 ]; do
   esac
   [ "$#" -ge 2 ] || fail '安装参数缺少值'
   case "$1" in
+    --github-proxy) github_proxy=$2;;
     --endpoint) endpoint=$2;;
     --server-id) server_id=$2;;
     --token) token=$2;;
@@ -58,6 +59,10 @@ while [ "$#" -gt 0 ]; do
   esac
   shift 2
 done
+case "$github_proxy" in
+  ''|'https://gh-proxy.org/') ;;
+  *) fail '不支持的 GitHub 下载代理';;
+esac
 # BEGIN FROZEN RELEASE
 release_version='0.3.0-preview.10'
 native_sha256='090bb8ab929f7759614af4847365476e43550cd4cf8cd571bec7326b4396c903'
@@ -209,7 +214,7 @@ step='从 GitHub 下载固定版本包'
 printf '正在下载 Agent %s (%s)…\n' "$version" "$platform"
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --connect-timeout 15 --max-time 180 --retry 2 --retry-delay 2 \
-  "https://github.com/JyJinYe/shijian-agent/releases/download/agent-$version/$filename" \
+  "${github_proxy}https://github.com/JyJinYe/shijian-agent/releases/download/agent-$version/$filename" \
   --output "$work/$filename"
 step='校验安装包 SHA256'
 (cd "$work" && printf '%s  %s\n' "$digest" "$filename" | sha256sum -c -)
